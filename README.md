@@ -220,3 +220,6 @@ The current status workflow is request-driven: the browser polls the status endp
 - Storage lifecycle rules
 - Automatic migration from Veo 3.1 preview IDs to the next production video model
 - Automated CI build and integration tests
+
+
+Deployment status: Vercel project linked to GitHub and production environment configured with Supabase.
