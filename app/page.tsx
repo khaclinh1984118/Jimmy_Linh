@@ -1,187 +1,267 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
-type Status = "queued" | "processing" | "completed" | "failed";
+type Status = "draft" | "queued" | "processing" | "completed" | "failed";
+type ModelTier = "standard" | "fast" | "lite";
 
-type VideoJob = {
-  operation: string;
+type Project = { id: string; name: string; created_at: string };
+type Profile = {
+  credits: number;
+  monthly_used_credits: number;
+  monthly_quota_credits: number;
+  quota_period_start: string;
+};
+
+type Generation = {
+  id: string;
+  project_id: string | null;
+  prompt: string;
+  mode: string;
+  model_tier: ModelTier;
+  model_id: string;
+  status: Status;
+  operation_name: string | null;
+  aspect_ratio: string;
+  duration_seconds: number;
+  resolution: string;
+  credits_reserved: number;
+  video_storage_path: string | null;
+  provider_video_uri: string | null;
+  parent_generation_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  videoUrl?: string | null;
+};
+
+type Asset = {
+  path: string;
+  preview: string;
+  name: string;
+};
+
+type ActiveJob = {
+  generationId: string;
+  operation?: string | null;
   status: Status;
   message: string;
-  videoUrl?: string;
-  error?: string;
-  mode?: "text-to-video" | "image-to-video";
+  videoUrl?: string | null;
 };
 
-type LibraryItem = {
-  id: string;
-  operation: string;
-  prompt: string;
-  status: Status;
-  createdAt: string;
-  aspectRatio: string;
-  duration: number;
-  resolution: string;
-  mode: "text-to-video" | "image-to-video";
-  videoUrl?: string;
+const BUCKET = "video-assets";
+
+const modelMeta: Record<ModelTier, {
+  name: string;
+  note: string;
+  supports4k: boolean;
+  supportsReferences: boolean;
+  supportsExtend: boolean;
+}> = {
+  standard: {
+    name: "Veo 3.1 Standard",
+    note: "Highest quality",
+    supports4k: true,
+    supportsReferences: true,
+    supportsExtend: true,
+  },
+  fast: {
+    name: "Veo 3.1 Fast",
+    note: "Best default",
+    supports4k: true,
+    supportsReferences: true,
+    supportsExtend: true,
+  },
+  lite: {
+    name: "Veo 3.1 Lite",
+    note: "Lowest cost",
+    supports4k: false,
+    supportsReferences: false,
+    supportsExtend: false,
+  },
 };
 
-const LIBRARY_KEY = "jimmy-ai-video-library-v2";
-
-const presets = [
-  {
-    label: "Cinematic",
-    prompt:
-      "Cinematic establishing shot, natural depth of field, slow controlled camera movement, realistic lighting, filmic contrast, detailed ambience and synchronized environmental sound.",
-  },
-  {
-    label: "Drone",
-    prompt:
-      "Wide aerial drone shot, smooth forward flight, layered landscape depth, golden-hour light, realistic motion, natural wind and distant environmental audio.",
-  },
-  {
-    label: "Product",
-    prompt:
-      "Premium commercial product shot, elegant studio lighting, slow orbit camera movement, crisp material details, clean background, subtle cinematic sound design.",
-  },
-  {
-    label: "Social",
-    prompt:
-      "Energetic vertical social-video composition, fast but smooth camera movement, strong subject focus, modern lighting, visually clear action, punchy natural audio.",
-  },
-];
-
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Không thể đọc ảnh."));
-    reader.readAsDataURL(file);
-  });
-}
+const rates: Record<ModelTier, Record<"720p" | "1080p" | "4k", number | null>> = {
+  standard: { "720p": 0.4, "1080p": 0.4, "4k": 0.6 },
+  fast: { "720p": 0.1, "1080p": 0.12, "4k": 0.3 },
+  lite: { "720p": 0.05, "1080p": 0.08, "4k": null },
+};
 
 function statusLabel(status: Status) {
-  if (status === "queued") return "Đã xếp hàng";
-  if (status === "processing") return "Đang render";
-  if (status === "completed") return "Hoàn tất";
-  return "Thất bại";
+  if (status === "queued") return "Queued";
+  if (status === "processing") return "Rendering";
+  if (status === "completed") return "Completed";
+  if (status === "failed") return "Failed";
+  return "Draft";
+}
+
+function filePreview(file: File) {
+  return URL.createObjectURL(file);
 }
 
 export default function HomePage() {
-  const [view, setView] = useState<"create" | "library">("create");
-  const [prompt, setPrompt] = useState("");
-  const [aspectRatio, setAspectRatio] = useState("16:9");
-  const [duration, setDuration] = useState("8");
-  const [resolution, setResolution] = useState("720p");
-  const [job, setJob] = useState<VideoJob | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [enhancing, setEnhancing] = useState(false);
-  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
-  const [imageName, setImageName] = useState("");
-  const [library, setLibrary] = useState<LibraryItem[]>([]);
+  const supabase = createClient();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [view, setView] = useState<"create" | "library">("create");
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [generations, setGenerations] = useState<Generation[]>([]);
+  const [selectedProject, setSelectedProject] = useState("");
+  const [email, setEmail] = useState("");
+
+  const [prompt, setPrompt] = useState("");
+  const [extendPrompt, setExtendPrompt] = useState("");
+  const [aspectRatio, setAspectRatio] = useState("16:9");
+  const [duration, setDuration] = useState("8");
+  const [resolution, setResolution] = useState<"720p" | "1080p" | "4k">("720p");
+  const [modelTier, setModelTier] = useState<ModelTier>("fast");
+
+  const [firstFrame, setFirstFrame] = useState<Asset | null>(null);
+  const [lastFrame, setLastFrame] = useState<Asset | null>(null);
+  const [references, setReferences] = useState<Asset[]>([]);
+
+  const [job, setJob] = useState<ActiveJob | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [enhancing, setEnhancing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LIBRARY_KEY);
-      if (saved) setLibrary(JSON.parse(saved));
-    } catch {
-      localStorage.removeItem(LIBRARY_KEY);
-    }
+    loadStudio();
 
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      [firstFrame, lastFrame, ...references].forEach((asset) => {
+        if (asset?.preview) URL.revokeObjectURL(asset.preview);
+      });
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function persistLibrary(items: LibraryItem[]) {
-    setLibrary(items);
-    localStorage.setItem(LIBRARY_KEY, JSON.stringify(items));
-  }
+  async function loadStudio() {
+    const response = await fetch("/api/studio", { cache: "no-store" });
 
-  function patchLibrary(operation: string, patch: Partial<LibraryItem>) {
-    setLibrary((current) => {
-      const next = current.map((item) =>
-        item.operation === operation ? { ...item, ...patch } : item,
-      );
-      localStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
-      return next;
-    });
-  }
+    if (response.status === 401) {
+      window.location.href = "/login";
+      return;
+    }
 
-  const estimatedCost = useMemo(() => {
-    const seconds = Number(duration);
-    if (resolution === "4k") return (seconds * 0.6).toFixed(2);
-    return (seconds * 0.4).toFixed(2);
-  }, [duration, resolution]);
-
-  async function refreshStatus(operation: string, updateActive = true) {
-    const response = await fetch(
-      "/api/videos/status?operation=" + encodeURIComponent(operation),
-      { cache: "no-store" },
-    );
     const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not load studio.");
 
-    if (!response.ok) {
-      throw new Error(data.error ?? "Không thể kiểm tra trạng thái video.");
+    setProfile(data.profile);
+    setProjects(data.projects || []);
+    setGenerations(data.generations || []);
+    setEmail(data.user?.email || "");
+
+    if (!selectedProject && data.projects?.[0]?.id) {
+      setSelectedProject(data.projects[0].id);
+    }
+  }
+
+  const estimatedCredits = useMemo(() => {
+    const rate = rates[modelTier][resolution];
+    if (rate === null) return null;
+    return Math.ceil(rate * Number(duration) * 100);
+  }, [duration, modelTier, resolution]);
+
+  const quotaPercent = useMemo(() => {
+    if (!profile || profile.monthly_quota_credits === 0) return 0;
+    return Math.min(
+      100,
+      (profile.monthly_used_credits / profile.monthly_quota_credits) * 100,
+    );
+  }, [profile]);
+
+  async function uploadAsset(file: File) {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      throw new Error("Only JPEG, PNG and WebP images are supported.");
+    }
+    if (file.size > 4 * 1024 * 1024) {
+      throw new Error("Each image must be under 4 MB.");
     }
 
-    if (updateActive) setJob(data);
-    patchLibrary(operation, {
-      status: data.status,
-      videoUrl: data.videoUrl,
+    const ticketResponse = await fetch("/api/assets/upload-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: file.name }),
     });
+    const ticket = await ticketResponse.json();
 
-    if (data.status === "completed" || data.status === "failed") {
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    if (!ticketResponse.ok) throw new Error(ticket.error || "Upload ticket failed.");
 
-    return data;
-  }
-
-  function startPolling(operation: string) {
-    if (pollRef.current) clearInterval(pollRef.current);
-
-    pollRef.current = setInterval(() => {
-      refreshStatus(operation).catch((error) => {
-        setJob((current) =>
-          current
-            ? {
-                ...current,
-                message:
-                  error instanceof Error
-                    ? error.message
-                    : "Lỗi kiểm tra trạng thái.",
-              }
-            : current,
-        );
+    const { error } = await supabase.storage
+      .from(BUCKET)
+      .uploadToSignedUrl(ticket.path, ticket.token, file, {
+        contentType: file.type,
       });
-    }, 10000);
+
+    if (error) throw error;
+
+    return {
+      path: ticket.path as string,
+      preview: filePreview(file),
+      name: file.name,
+    };
   }
 
-  async function handleImage(event: ChangeEvent<HTMLInputElement>) {
+  async function handleSingleAsset(
+    event: ChangeEvent<HTMLInputElement>,
+    setter: (asset: Asset | null) => void,
+  ) {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      alert("Chỉ hỗ trợ JPEG, PNG hoặc WebP.");
-      event.target.value = "";
-      return;
-    }
-
-    if (file.size > 4 * 1024 * 1024) {
-      alert("Ảnh phải nhỏ hơn 4 MB.");
-      event.target.value = "";
-      return;
-    }
-
+    setUploading(true);
     try {
-      setImageDataUrl(await readFileAsDataUrl(file));
-      setImageName(file.name);
+      setter(await uploadAsset(file));
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Không thể đọc ảnh.");
+      alert(error instanceof Error ? error.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
     }
+  }
+
+  async function handleReferences(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []).slice(0, 3);
+    if (!files.length) return;
+
+    setUploading(true);
+    try {
+      const uploaded: Asset[] = [];
+      for (const file of files) uploaded.push(await uploadAsset(file));
+      setReferences(uploaded);
+      setFirstFrame(null);
+      setLastFrame(null);
+      setDuration("8");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  async function createProject() {
+    const name = window.prompt("Project name");
+    if (!name?.trim()) return;
+
+    const response = await fetch("/api/studio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      alert(data.error || "Could not create project.");
+      return;
+    }
+
+    await loadStudio();
+    setSelectedProject(data.project.id);
   }
 
   async function enhancePrompt() {
@@ -195,18 +275,61 @@ export default function HomePage() {
         body: JSON.stringify({ prompt }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Không thể nâng cấp prompt.");
+      if (!response.ok) throw new Error(data.error || "Could not enhance prompt.");
       setPrompt(data.prompt);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Không thể nâng cấp prompt.");
+      alert(error instanceof Error ? error.message : "Enhance failed.");
     } finally {
       setEnhancing(false);
     }
   }
 
+  async function refreshStatus(generationId: string) {
+    const response = await fetch(
+      "/api/videos/status?generationId=" + encodeURIComponent(generationId),
+      { cache: "no-store" },
+    );
+    const data = await response.json();
+
+    if (!response.ok) throw new Error(data.error || "Status check failed.");
+
+    setJob({
+      generationId,
+      operation: data.operation,
+      status: data.status,
+      message: data.message,
+      videoUrl: data.videoUrl,
+    });
+
+    if (data.status === "completed" || data.status === "failed") {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      await loadStudio();
+    }
+
+    return data;
+  }
+
+  function startPolling(generationId: string) {
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    pollRef.current = setInterval(() => {
+      refreshStatus(generationId).catch((error) => {
+        setJob((current) =>
+          current
+            ? {
+                ...current,
+                message: error instanceof Error ? error.message : "Polling failed.",
+              }
+            : current,
+        );
+      });
+    }, 10000);
+  }
+
   async function generateVideo(event: FormEvent) {
     event.preventDefault();
-    setLoading(true);
+    setBusy(true);
     setJob(null);
 
     try {
@@ -214,73 +337,120 @@ export default function HomePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          projectId: selectedProject || null,
           prompt,
+          modelTier,
           aspectRatio,
           duration: Number(duration),
           resolution,
-          imageDataUrl,
+          firstFramePath: firstFrame?.path || null,
+          lastFramePath: lastFrame?.path || null,
+          referencePaths: references.map((x) => x.path),
         }),
       });
 
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Không thể tạo video.");
+      if (!response.ok) throw new Error(data.error || "Generation failed.");
 
-      setJob(data);
-
-      const item: LibraryItem = {
-        id: crypto.randomUUID(),
-        operation: data.operation,
-        prompt: prompt.trim(),
-        status: data.status,
-        createdAt: new Date().toISOString(),
-        aspectRatio,
-        duration: Number(duration),
-        resolution,
-        mode: imageDataUrl ? "image-to-video" : "text-to-video",
-      };
-
-      persistLibrary([item, ...library.filter((x) => x.operation !== data.operation)].slice(0, 30));
-      startPolling(data.operation);
-    } catch (error) {
       setJob({
-        operation: "error",
-        status: "failed",
-        message: error instanceof Error ? error.message : "Đã xảy ra lỗi.",
+        generationId: data.generationId,
+        operation: data.operation,
+        status: data.status,
+        message: data.message,
       });
+
+      await loadStudio();
+      startPolling(data.generationId);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Generation failed.");
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  async function openLibraryItem(item: LibraryItem) {
+  async function extendCurrentVideo() {
+    if (!job?.generationId || !extendPrompt.trim()) return;
+    setBusy(true);
+
+    try {
+      const response = await fetch("/api/videos/extend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parentGenerationId: job.generationId,
+          prompt: extendPrompt,
+          modelTier: modelTier === "lite" ? "fast" : modelTier,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Extend failed.");
+
+      setJob({
+        generationId: data.generationId,
+        operation: data.operation,
+        status: data.status,
+        message: data.message,
+      });
+
+      setExtendPrompt("");
+      await loadStudio();
+      startPolling(data.generationId);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Extend failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openGeneration(item: Generation) {
     setView("create");
     setPrompt(item.prompt);
-    setAspectRatio(item.aspectRatio);
-    setDuration(String(item.duration));
-    setResolution(item.resolution);
+    setSelectedProject(item.project_id || selectedProject);
+    setModelTier(item.model_tier);
+    setAspectRatio(item.aspect_ratio);
+    setDuration(String(item.duration_seconds));
+    setResolution(item.resolution as "720p" | "1080p" | "4k");
     setJob({
-      operation: item.operation,
+      generationId: item.id,
+      operation: item.operation_name,
       status: item.status,
       message:
         item.status === "completed"
-          ? "Video đã tạo xong."
-          : "Đang lấy trạng thái mới nhất...",
+          ? "Saved in Supabase Storage."
+          : "Loading latest status...",
       videoUrl: item.videoUrl,
-      mode: item.mode,
     });
 
-    try {
-      const data = await refreshStatus(item.operation);
-      if (data.status === "queued" || data.status === "processing") {
-        startPolling(item.operation);
-      }
-    } catch {
-      // Keep the last saved snapshot visible.
+    if (item.status === "queued" || item.status === "processing") {
+      await refreshStatus(item.id);
+      startPolling(item.id);
     }
   }
 
-  function removeLibraryItem(id: string) {
-    persistLibrary(library.filter((item) => item.id !== id));
+  async function signOut() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  function onModelChange(value: ModelTier) {
+    setModelTier(value);
+
+    if (value === "lite") {
+      if (resolution === "4k") setResolution("1080p");
+      setReferences([]);
+    }
+  }
+
+  function enableInterpolation() {
+    setReferences([]);
+    setDuration("8");
+  }
+
+  function enableReferences() {
+    setFirstFrame(null);
+    setLastFrame(null);
+    setDuration("8");
   }
 
   return (
@@ -291,7 +461,7 @@ export default function HomePage() {
             <div className="brand-mark">J</div>
             <div>
               <strong>Jimmy Studio</strong>
-              <span>AI Video Generator</span>
+              <span>Production workspace</span>
             </div>
           </div>
 
@@ -309,26 +479,49 @@ export default function HomePage() {
               onClick={() => setView("library")}
             >
               <span>▦</span> Library
-              <em>{library.length}</em>
+              <em>{generations.length}</em>
             </button>
           </nav>
 
-          <div className="sidebar-info">
-            <span className="online-dot" />
-            <div>
-              <strong>Veo 3.1</strong>
-              <small>Real generation API</small>
+          <div className="credit-card">
+            <span>Credits</span>
+            <strong>{profile?.credits ?? "—"}</strong>
+            <small>100 credits ≈ $1 provider cost</small>
+            <div className="quota-track">
+              <div className="quota-fill" style={{ width: quotaPercent + "%" }} />
             </div>
+            <small>
+              {profile
+                ? profile.monthly_used_credits + " / " + profile.monthly_quota_credits + " monthly"
+                : "Loading quota..."}
+            </small>
+          </div>
+
+          <div className="sidebar-user">
+            <span>{email || "Signed in"}</span>
+            <button type="button" onClick={signOut}>Sign out</button>
           </div>
         </aside>
 
         <section className="workspace">
+          <div className="deprecation-banner">
+            Veo 3.1 preview models are scheduled to retire on 22 Oct 2026.
+            Model IDs are isolated in configuration so the studio can migrate without UI changes.
+          </div>
+
           <header className="topbar">
             <div>
               <span className="eyebrow">AI VIDEO STUDIO</span>
-              <h1>{view === "create" ? "Create a new video" : "Your generations"}</h1>
+              <h1>{view === "create" ? "Create & direct" : "Projects & generations"}</h1>
             </div>
-            <div className="model-pill">Veo 3.1 · Standard</div>
+            <div className="project-picker">
+              <select value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)}>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+              <button type="button" className="ghost-button" onClick={createProject}>+ Project</button>
+            </div>
           </header>
 
           {view === "create" ? (
@@ -337,43 +530,23 @@ export default function HomePage() {
                 <div className="section-heading">
                   <div>
                     <span className="step">01</span>
-                    <h2>Source</h2>
+                    <h2>Model</h2>
                   </div>
-                  <span className="mode-chip">
-                    {imageDataUrl ? "Image → Video" : "Text → Video"}
-                  </span>
+                  <span className="mode-chip">{modelMeta[modelTier].note}</span>
                 </div>
 
-                <div className="upload-zone">
-                  {imageDataUrl ? (
-                    <div className="image-preview">
-                      <img src={imageDataUrl} alt="Ảnh đầu vào" />
-                      <div className="image-meta">
-                        <span>{imageName}</span>
-                        <button
-                          className="ghost-button"
-                          type="button"
-                          onClick={() => {
-                            setImageDataUrl(null);
-                            setImageName("");
-                          }}
-                        >
-                          Xóa ảnh
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <label className="upload-label">
-                      <span className="upload-icon">＋</span>
-                      <strong>Thêm ảnh khởi đầu</strong>
-                      <small>Tùy chọn · JPEG, PNG, WebP · tối đa 4 MB</small>
-                      <input
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={handleImage}
-                      />
-                    </label>
-                  )}
+                <div className="model-grid">
+                  {(Object.keys(modelMeta) as ModelTier[]).map((tier) => (
+                    <button
+                      type="button"
+                      key={tier}
+                      className={modelTier === tier ? "model-card selected" : "model-card"}
+                      onClick={() => onModelChange(tier)}
+                    >
+                      <strong>{modelMeta[tier].name}</strong>
+                      <small>{modelMeta[tier].note}</small>
+                    </button>
+                  ))}
                 </div>
 
                 <div className="section-heading prompt-heading">
@@ -382,12 +555,12 @@ export default function HomePage() {
                     <h2>Prompt</h2>
                   </div>
                   <button
-                    className="enhance-button"
                     type="button"
+                    className="enhance-button"
                     onClick={enhancePrompt}
-                    disabled={!prompt.trim() || enhancing}
+                    disabled={enhancing || !prompt.trim()}
                   >
-                    {enhancing ? "Đang tối ưu..." : "✦ Enhance"}
+                    {enhancing ? "Enhancing..." : "✦ Enhance"}
                   </button>
                 </div>
 
@@ -395,53 +568,106 @@ export default function HomePage() {
                   className="prompt-box"
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Mô tả chủ thể, hành động, bối cảnh, chuyển động camera, ánh sáng và âm thanh..."
+                  placeholder="Describe subject, action, camera, lighting, style and audio..."
                   required
                 />
-
-                <div className="preset-row">
-                  {presets.map((preset) => (
-                    <button
-                      type="button"
-                      className="preset"
-                      key={preset.label}
-                      onClick={() =>
-                        setPrompt((current) =>
-                          current.trim()
-                            ? current.trim() + " " + preset.prompt
-                            : preset.prompt,
-                        )
-                      }
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
 
                 <div className="section-heading settings-heading">
                   <div>
                     <span className="step">03</span>
-                    <h2>Generation settings</h2>
+                    <h2>Creative controls</h2>
+                  </div>
+                </div>
+
+                <div className="advanced-tabs">
+                  <div className="asset-panel">
+                    <div className="asset-title">
+                      <strong>First frame</strong>
+                      <small>Image → video</small>
+                    </div>
+                    {firstFrame ? (
+                      <div className="mini-preview">
+                        <img src={firstFrame.preview} alt="" />
+                        <button type="button" onClick={() => setFirstFrame(null)}>×</button>
+                      </div>
+                    ) : (
+                      <label className="mini-upload" onClick={enableInterpolation}>
+                        + Add first frame
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={(e) => handleSingleAsset(e, setFirstFrame)}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="asset-panel">
+                    <div className="asset-title">
+                      <strong>Last frame</strong>
+                      <small>Interpolation</small>
+                    </div>
+                    {lastFrame ? (
+                      <div className="mini-preview">
+                        <img src={lastFrame.preview} alt="" />
+                        <button type="button" onClick={() => setLastFrame(null)}>×</button>
+                      </div>
+                    ) : (
+                      <label className="mini-upload" onClick={enableInterpolation}>
+                        + Add last frame
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          disabled={!firstFrame}
+                          onChange={(e) => handleSingleAsset(e, setLastFrame)}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="asset-panel reference-panel">
+                    <div className="asset-title">
+                      <strong>Reference images</strong>
+                      <small>Up to 3 assets</small>
+                    </div>
+
+                    <div className="reference-strip">
+                      {references.map((asset) => (
+                        <img key={asset.path} src={asset.preview} alt="" />
+                      ))}
+                      <label
+                        className={
+                          modelMeta[modelTier].supportsReferences
+                            ? "mini-upload"
+                            : "mini-upload disabled"
+                        }
+                        onClick={enableReferences}
+                      >
+                        {references.length ? "Replace references" : "+ Add references"}
+                        <input
+                          type="file"
+                          multiple
+                          accept="image/jpeg,image/png,image/webp"
+                          disabled={!modelMeta[modelTier].supportsReferences}
+                          onChange={handleReferences}
+                        />
+                      </label>
+                    </div>
                   </div>
                 </div>
 
                 <div className="settings-grid">
                   <div>
-                    <label htmlFor="ratio">Frame</label>
-                    <select
-                      id="ratio"
-                      value={aspectRatio}
-                      onChange={(e) => setAspectRatio(e.target.value)}
-                    >
+                    <label>Frame</label>
+                    <select value={aspectRatio} onChange={(e) => setAspectRatio(e.target.value)}>
                       <option value="16:9">16:9 · Landscape</option>
                       <option value="9:16">9:16 · Portrait</option>
                     </select>
                   </div>
 
                   <div>
-                    <label htmlFor="duration">Duration</label>
+                    <label>Duration</label>
                     <select
-                      id="duration"
                       value={duration}
                       onChange={(e) => {
                         const value = e.target.value;
@@ -453,6 +679,7 @@ export default function HomePage() {
                           setResolution("720p");
                         }
                       }}
+                      disabled={Boolean(lastFrame || references.length)}
                     >
                       <option value="4">4 seconds</option>
                       <option value="6">6 seconds</option>
@@ -461,33 +688,34 @@ export default function HomePage() {
                   </div>
 
                   <div>
-                    <label htmlFor="resolution">Resolution</label>
+                    <label>Resolution</label>
                     <select
-                      id="resolution"
                       value={resolution}
                       onChange={(e) => {
-                        const value = e.target.value;
+                        const value = e.target.value as "720p" | "1080p" | "4k";
                         setResolution(value);
-                        if (value === "1080p" || value === "4k") setDuration("8");
+                        if (value !== "720p") setDuration("8");
                       }}
                     >
                       <option value="720p">720p</option>
                       <option value="1080p">1080p · 8 sec</option>
-                      <option value="4k">4K · 8 sec</option>
+                      {modelMeta[modelTier].supports4k && <option value="4k">4K · 8 sec</option>}
                     </select>
                   </div>
                 </div>
 
                 <div className="generate-bar">
                   <div>
-                    <small>Ước tính Veo Standard</small>
-                    <strong>~${estimatedCost} / generation</strong>
+                    <small>Estimated reservation</small>
+                    <strong>
+                      {estimatedCredits === null ? "Unsupported" : estimatedCredits + " credits"}
+                    </strong>
                   </div>
                   <button
                     className="generate-button"
-                    disabled={loading || !prompt.trim()}
+                    disabled={busy || uploading || !prompt.trim() || estimatedCredits === null}
                   >
-                    {loading ? "Đang gửi..." : "Generate video →"}
+                    {uploading ? "Uploading assets..." : busy ? "Submitting..." : "Generate video →"}
                   </button>
                 </div>
               </form>
@@ -495,16 +723,16 @@ export default function HomePage() {
               <aside className="studio-card preview-panel">
                 <div className="section-heading">
                   <div>
-                    <span className="step">PREVIEW</span>
-                    <h2>Output</h2>
+                    <span className="step">OUTPUT</span>
+                    <h2>Preview & extend</h2>
                   </div>
                 </div>
 
                 {!job ? (
                   <div className="empty-preview">
                     <div className="preview-orb">▶</div>
-                    <strong>Your video will appear here</strong>
-                    <span>Configure your scene and start generation.</span>
+                    <strong>Your persistent video output appears here</strong>
+                    <span>Completed MP4 files are copied into private Supabase Storage.</span>
                   </div>
                 ) : (
                   <div className="job-panel">
@@ -519,7 +747,7 @@ export default function HomePage() {
                     {(job.status === "queued" || job.status === "processing") && (
                       <div className="render-stage">
                         <div className="render-glow" />
-                        <span>Veo is rendering your scene</span>
+                        <span>Rendering and synchronizing...</span>
                         <div className="progress-track">
                           <div className="progress-indeterminate" />
                         </div>
@@ -528,37 +756,36 @@ export default function HomePage() {
 
                     {job.videoUrl && (
                       <div className="video-wrap">
-                        <video
-                          src={job.videoUrl}
-                          controls
-                          playsInline
-                          preload="metadata"
-                        />
+                        <video src={job.videoUrl} controls playsInline preload="metadata" />
+
                         <div className="video-actions">
-                          <a
-                            className="download-button"
-                            href={job.videoUrl}
-                            download="jimmy-ai-video.mp4"
-                          >
+                          <a className="download-button" href={job.videoUrl} download>
                             ↓ Download MP4
                           </a>
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => navigator.clipboard.writeText(prompt)}
-                          >
-                            Copy prompt
-                          </button>
                         </div>
+
+                        {modelMeta[modelTier === "lite" ? "fast" : modelTier].supportsExtend && (
+                          <div className="extend-box">
+                            <label>Extend this Veo video by 7 seconds</label>
+                            <textarea
+                              value={extendPrompt}
+                              onChange={(e) => setExtendPrompt(e.target.value)}
+                              placeholder="Describe what happens next..."
+                            />
+                            <button
+                              type="button"
+                              className="generate-button"
+                              onClick={extendCurrentVideo}
+                              disabled={busy || !extendPrompt.trim()}
+                            >
+                              Extend video
+                            </button>
+                            <small>
+                              Extension uses 720p and requires the provider reference to still be valid.
+                            </small>
+                          </div>
+                        )}
                       </div>
-                    )}
-
-                    {job.status === "failed" && (
-                      <div className="error-box">{job.error || job.message}</div>
-                    )}
-
-                    {job.operation !== "error" && (
-                      <code className="operation-code">{job.operation}</code>
                     )}
                   </div>
                 )}
@@ -566,60 +793,48 @@ export default function HomePage() {
             </div>
           ) : (
             <div className="library-view">
-              {library.length === 0 ? (
+              <div className="library-grid">
+                {generations.map((item) => (
+                  <article className="studio-card library-item" key={item.id}>
+                    <div className="library-thumb">
+                      {item.videoUrl ? (
+                        <video src={item.videoUrl} muted preload="metadata" />
+                      ) : (
+                        <div className="library-placeholder">{item.mode.toUpperCase()}</div>
+                      )}
+                      <span className={"library-status " + item.status}>
+                        {statusLabel(item.status)}
+                      </span>
+                    </div>
+
+                    <div className="library-body">
+                      <p>{item.prompt}</p>
+                      <div className="library-meta">
+                        <span>{modelMeta[item.model_tier].name.replace("Veo 3.1 ", "")}</span>
+                        <span>{item.aspect_ratio}</span>
+                        <span>{item.resolution}</span>
+                        <span>{item.credits_reserved} cr</span>
+                      </div>
+                      <small>{new Date(item.created_at).toLocaleString("vi-VN")}</small>
+                      <div className="library-actions">
+                        <button
+                          type="button"
+                          className="open-button"
+                          onClick={() => openGeneration(item)}
+                        >
+                          Open
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {!generations.length && (
                 <div className="studio-card library-empty">
                   <span>▦</span>
-                  <h2>Chưa có video nào</h2>
-                  <p>Các generation mới sẽ xuất hiện tại đây.</p>
-                  <button className="generate-button" onClick={() => setView("create")}>
-                    Create first video
-                  </button>
-                </div>
-              ) : (
-                <div className="library-grid">
-                  {library.map((item) => (
-                    <article className="studio-card library-item" key={item.id}>
-                      <div className="library-thumb">
-                        {item.videoUrl && item.status === "completed" ? (
-                          <video src={item.videoUrl} muted preload="metadata" />
-                        ) : (
-                          <div className="library-placeholder">
-                            {item.mode === "image-to-video" ? "IMG → VIDEO" : "TEXT → VIDEO"}
-                          </div>
-                        )}
-                        <span className={"library-status " + item.status}>
-                          {statusLabel(item.status)}
-                        </span>
-                      </div>
-                      <div className="library-body">
-                        <p>{item.prompt}</p>
-                        <div className="library-meta">
-                          <span>{item.aspectRatio}</span>
-                          <span>{item.duration}s</span>
-                          <span>{item.resolution}</span>
-                        </div>
-                        <small>
-                          {new Date(item.createdAt).toLocaleString("vi-VN")}
-                        </small>
-                        <div className="library-actions">
-                          <button
-                            type="button"
-                            className="open-button"
-                            onClick={() => openLibraryItem(item)}
-                          >
-                            Open
-                          </button>
-                          <button
-                            type="button"
-                            className="delete-button"
-                            onClick={() => removeLibraryItem(item.id)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  ))}
+                  <h2>No generations yet</h2>
+                  <p>Create your first persistent video project.</p>
                 </div>
               )}
             </div>
