@@ -1,5 +1,10 @@
 const BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
+type InputImage = {
+  data: string;
+  mimeType: string;
+};
+
 function getApiKey() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -31,11 +36,50 @@ async function googleRequest(url: string, init?: RequestInit) {
     const message =
       data?.error?.message ||
       data?.message ||
-      "Google Veo API trả về lỗi HTTP " + response.status + ".";
+      "Google API trả về lỗi HTTP " + response.status + ".";
     throw new Error(message);
   }
 
   return data;
+}
+
+export async function enhanceVideoPrompt(prompt: string) {
+  const model = process.env.PROMPT_MODEL || "gemini-3.8-flash";
+  const instruction =
+    "Rewrite the user's idea into one concise cinematic video-generation prompt for Veo. " +
+    "Preserve the user's intent. Add subject, action, environment, shot type, camera motion, lighting, visual style, pacing, and useful audio cues. " +
+    "Do not add unsafe content or extra explanation. Return only the enhanced prompt in English.";
+
+  const data = await googleRequest(
+    BASE_URL + "/models/" + encodeURIComponent(model) + ":generateContent",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: instruction }],
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 500,
+        },
+      }),
+    },
+  );
+
+  const text = data?.candidates?.[0]?.content?.parts
+    ?.map((part: any) => part?.text || "")
+    .join("")
+    .trim();
+
+  if (!text) throw new Error("Không nhận được prompt nâng cấp từ Gemini.");
+  return text;
 }
 
 export async function createVideoJob(input: {
@@ -43,8 +87,22 @@ export async function createVideoJob(input: {
   aspectRatio: string;
   duration: number;
   resolution: string;
+  image?: InputImage | null;
 }) {
   const model = process.env.VEO_MODEL || "veo-3.1-generate-preview";
+
+  const instance: Record<string, unknown> = {
+    prompt: input.prompt,
+  };
+
+  if (input.image) {
+    instance.image = {
+      inlineData: {
+        mimeType: input.image.mimeType,
+        data: input.image.data,
+      },
+    };
+  }
 
   const data = await googleRequest(
     BASE_URL + "/models/" + encodeURIComponent(model) + ":predictLongRunning",
@@ -52,7 +110,7 @@ export async function createVideoJob(input: {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        instances: [{ prompt: input.prompt }],
+        instances: [instance],
         parameters: {
           aspectRatio: input.aspectRatio,
           durationSeconds: String(input.duration),
@@ -70,7 +128,10 @@ export async function createVideoJob(input: {
   return {
     operation: data.name,
     status: "queued" as const,
-    message: "Đã gửi yêu cầu tới Veo 3.1. Hệ thống sẽ tự kiểm tra tiến trình.",
+    mode: input.image ? "image-to-video" : "text-to-video",
+    message: input.image
+      ? "Đã gửi ảnh và prompt tới Veo 3.1."
+      : "Đã gửi prompt tới Veo 3.1.",
   };
 }
 
