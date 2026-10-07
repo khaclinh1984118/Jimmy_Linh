@@ -72,7 +72,7 @@ export async function enhanceVideoPrompt(prompt: string) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: instruction }] },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 500 },
+        generationConfig: { maxOutputTokens: 500 },
       }),
     },
   );
