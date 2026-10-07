@@ -1,14 +1,19 @@
 const BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
-type InputImage = {
+export type InputImage = {
   data: string;
   mimeType: string;
+};
+
+export type ReferenceImage = {
+  image: InputImage;
+  referenceType: "asset";
 };
 
 function getApiKey() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("Thiếu GEMINI_API_KEY. Hãy thêm key vào .env.local hoặc biến môi trường khi deploy.");
+    throw new Error("Thieu GEMINI_API_KEY.");
   }
   return apiKey;
 }
@@ -36,19 +41,28 @@ async function googleRequest(url: string, init?: RequestInit) {
     const message =
       data?.error?.message ||
       data?.message ||
-      "Google API trả về lỗi HTTP " + response.status + ".";
+      "Google API HTTP " + response.status + ".";
     throw new Error(message);
   }
 
   return data;
 }
 
+function imagePayload(image: InputImage) {
+  return {
+    inlineData: {
+      mimeType: image.mimeType,
+      data: image.data,
+    },
+  };
+}
+
 export async function enhanceVideoPrompt(prompt: string) {
   const model = process.env.PROMPT_MODEL || "gemini-3.8-flash";
   const instruction =
-    "Rewrite the user's idea into one concise cinematic video-generation prompt for Veo. " +
-    "Preserve the user's intent. Add subject, action, environment, shot type, camera motion, lighting, visual style, pacing, and useful audio cues. " +
-    "Do not add unsafe content or extra explanation. Return only the enhanced prompt in English.";
+    "Rewrite the user's idea into one concise cinematic video-generation prompt. " +
+    "Preserve intent. Add subject, action, environment, shot type, camera motion, lighting, visual style, pacing, and useful audio cues. " +
+    "Do not add extra explanation. Return only the enhanced English prompt.";
 
   const data = await googleRequest(
     BASE_URL + "/models/" + encodeURIComponent(model) + ":generateContent",
@@ -56,19 +70,9 @@ export async function enhanceVideoPrompt(prompt: string) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: instruction }],
-        },
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 500,
-        },
+        systemInstruction: { parts: [{ text: instruction }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 500 },
       }),
     },
   );
@@ -78,66 +82,70 @@ export async function enhanceVideoPrompt(prompt: string) {
     .join("")
     .trim();
 
-  if (!text) throw new Error("Không nhận được prompt nâng cấp từ Gemini.");
+  if (!text) throw new Error("Khong nhan duoc prompt nang cap.");
   return text;
 }
 
 export async function createVideoJob(input: {
+  model: string;
   prompt: string;
   aspectRatio: string;
   duration: number;
   resolution: string;
-  image?: InputImage | null;
+  firstFrame?: InputImage | null;
+  lastFrame?: InputImage | null;
+  referenceImages?: ReferenceImage[];
+  extendVideoUri?: string | null;
 }) {
-  const model = process.env.VEO_MODEL || "veo-3.1-generate-preview";
-
   const instance: Record<string, unknown> = {
     prompt: input.prompt,
   };
 
-  if (input.image) {
-    instance.image = {
-      inlineData: {
-        mimeType: input.image.mimeType,
-        data: input.image.data,
-      },
-    };
+  if (input.extendVideoUri) {
+    instance.video = { uri: input.extendVideoUri };
+  } else {
+    if (input.firstFrame) instance.image = imagePayload(input.firstFrame);
+    if (input.lastFrame) instance.lastFrame = imagePayload(input.lastFrame);
+    if (input.referenceImages?.length) {
+      instance.referenceImages = input.referenceImages.map((ref) => ({
+        image: imagePayload(ref.image),
+        referenceType: ref.referenceType,
+      }));
+    }
+  }
+
+  const parameters: Record<string, unknown> = {
+    aspectRatio: input.aspectRatio,
+    resolution: input.resolution,
+    numberOfVideos: 1,
+  };
+
+  if (!input.extendVideoUri) {
+    parameters.durationSeconds = String(input.duration);
   }
 
   const data = await googleRequest(
-    BASE_URL + "/models/" + encodeURIComponent(model) + ":predictLongRunning",
+    BASE_URL + "/models/" + encodeURIComponent(input.model) + ":predictLongRunning",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         instances: [instance],
-        parameters: {
-          aspectRatio: input.aspectRatio,
-          durationSeconds: String(input.duration),
-          resolution: input.resolution,
-          numberOfVideos: 1,
-        },
+        parameters,
       }),
     },
   );
 
   if (!data?.name) {
-    throw new Error("Google Veo không trả về operation name.");
+    throw new Error("Google video API khong tra ve operation name.");
   }
 
-  return {
-    operation: data.name,
-    status: "queued" as const,
-    mode: input.image ? "image-to-video" : "text-to-video",
-    message: input.image
-      ? "Đã gửi ảnh và prompt tới Veo 3.1."
-      : "Đã gửi prompt tới Veo 3.1.",
-  };
+  return { operation: data.name };
 }
 
 export async function getVideoJob(operation: string) {
   if (!operation.startsWith("operations/")) {
-    throw new Error("Operation không hợp lệ.");
+    throw new Error("Operation khong hop le.");
   }
 
   const operationPath = operation
@@ -149,18 +157,16 @@ export async function getVideoJob(operation: string) {
 
   if (!data?.done) {
     return {
-      operation,
       status: "processing" as const,
-      message: "Veo đang render video. Tiến trình có thể mất vài phút.",
+      message: "Video dang render.",
     };
   }
 
   if (data?.error) {
     return {
-      operation,
       status: "failed" as const,
-      message: data.error.message || "Veo không thể hoàn tất video.",
-      error: data.error.message || "Video generation failed",
+      message: data.error.message || "Video generation failed.",
+      error: data.error.message || "Video generation failed.",
     };
   }
 
@@ -172,18 +178,16 @@ export async function getVideoJob(operation: string) {
 
   if (!uri) {
     return {
-      operation,
       status: "failed" as const,
-      message: "Job đã hoàn tất nhưng không tìm thấy URL video trong phản hồi.",
+      message: "Job hoan tat nhung khong co video URI.",
       error: "Missing generated video URI",
     };
   }
 
   return {
-    operation,
     status: "completed" as const,
-    message: "Video đã tạo xong.",
-    videoUrl: "/api/videos/content?uri=" + encodeURIComponent(uri),
+    message: "Video da tao xong.",
+    providerVideoUri: uri as string,
   };
 }
 
@@ -197,19 +201,17 @@ export async function downloadVideo(uri: string) {
       url.hostname.endsWith(".googleapis.com"));
 
   if (!allowed) {
-    throw new Error("Video URL không thuộc miền Google được phép.");
+    throw new Error("Video URL khong thuoc mien Google duoc phep.");
   }
 
   const response = await fetch(url, {
-    headers: {
-      "x-goog-api-key": getApiKey(),
-    },
+    headers: { "x-goog-api-key": getApiKey() },
     redirect: "follow",
     cache: "no-store",
   });
 
-  if (!response.ok || !response.body) {
-    throw new Error("Không thể tải video từ Google (HTTP " + response.status + ").");
+  if (!response.ok) {
+    throw new Error("Khong the tai video tu Google (HTTP " + response.status + ").");
   }
 
   return response;
