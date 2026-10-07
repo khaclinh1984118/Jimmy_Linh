@@ -1,37 +1,85 @@
-# Jimmy AI Video Generator
+# Jimmy AI Video Studio
 
-MVP **text-to-video chạy thật** bằng Google Veo 3.1 qua Gemini API.
+Một MVP **AI Video Studio chạy thật** bằng **Google Veo 3.1 + Gemini API**, xây trên Next.js.
 
-## Luồng hoạt động
+## Studio hiện có gì?
 
-1. Người dùng nhập prompt và chọn tỉ lệ, thời lượng, độ phân giải.
-2. `POST /api/videos` gửi long-running job tới Veo 3.1.
-3. Frontend gọi `GET /api/videos/status` mỗi 10 giây.
-4. Khi hoàn tất, app nhận URI video từ Gemini API.
-5. `GET /api/videos/content` proxy video về trình duyệt để API key không bị lộ.
-6. Người dùng xem preview hoặc tải MP4.
+### Create
+- Text-to-video bằng Veo 3.1
+- Image-to-video: upload ảnh khởi đầu rồi animate bằng Veo
+- Prompt Enhancer bằng Gemini
+- Preset prompt: Cinematic, Drone, Product, Social
+- Tỉ lệ 16:9 và 9:16
+- Thời lượng 4 / 6 / 8 giây
+- 720p / 1080p / 4K
+- Audio sinh tự nhiên từ Veo
+- Theo dõi long-running operation tự động mỗi 10 giây
+- Preview video ngay trong studio
+- Download MP4
+- API key chỉ nằm ở server
 
-## Công nghệ
+### Library
+- Lưu tối đa 30 generation gần nhất trong localStorage
+- Lưu prompt, operation ID, trạng thái, tỉ lệ, thời lượng và độ phân giải
+- Mở lại job cũ và refresh trạng thái từ Veo
+- Xóa job khỏi thư viện local
 
-- Next.js 14
-- React 18
-- TypeScript
-- Google Gemini API / Veo 3.1
-- Không cần database cho MVP hiện tại
+> Library hiện là local-first MVP. Khi chuyển sang production nên thay bằng PostgreSQL/Supabase và object storage.
 
-## Chuẩn bị Gemini API key
+## Kiến trúc
 
-Tạo một Gemini API key có quyền sử dụng Veo 3.1, sau đó tạo file:
+```text
+Browser
+  |
+  |-- POST /api/prompt/enhance
+  |      -> Gemini text model
+  |
+  |-- POST /api/videos
+  |      -> Veo 3.1 predictLongRunning
+  |
+  |-- GET /api/videos/status
+  |      -> poll Google long-running operation
+  |
+  |-- GET /api/videos/content
+         -> secure server-side proxy -> MP4
+```
+
+## Cấu trúc chính
+
+```text
+app/
+├── api/
+│   ├── prompt/
+│   │   └── enhance/
+│   │       └── route.ts
+│   └── videos/
+│       ├── content/
+│       │   └── route.ts
+│       ├── status/
+│       │   └── route.ts
+│       └── route.ts
+├── globals.css
+├── layout.tsx
+└── page.tsx
+lib/
+└── veo.ts
+```
+
+## Cấu hình
+
+Sao chép file môi trường:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Điền:
+Điền API key:
 
 ```env
-GEMINI_API_KEY=your_key_here
+GEMINI_API_KEY=your_google_ai_key
 VEO_MODEL=veo-3.1-generate-preview
+PROMPT_MODEL=gemini-3.8-flash
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
 Không commit `.env.local` hoặc API key thật lên GitHub.
@@ -45,61 +93,71 @@ npm run dev
 
 Mở:
 
-```
+```text
 http://localhost:3000
 ```
 
-## Khả năng MVP
+## Image-to-video
 
-- Text-to-video thật
-- Tỉ lệ 16:9 và 9:16
-- 4 / 6 / 8 giây
-- 720p
-- 1080p khi thời lượng là 8 giây
-- Audio do Veo sinh tự nhiên
-- Polling trạng thái bất đồng bộ
-- Preview video
-- Tải MP4
-- API key chỉ tồn tại ở server
+Ảnh được đọc ở browser và gửi dưới dạng data URL đến server. MVP giới hạn:
 
-## API nội bộ
+- JPEG
+- PNG
+- WebP
+- tối đa 4 MB
 
-### POST /api/videos
+Server tách base64 và gửi ảnh dưới dạng `inlineData` vào input của Veo.
 
-Ví dụ:
+## Prompt Enhancer
 
-```json
-{
-  "prompt": "A cinematic sunrise over a Vietnamese school courtyard, slow drone push-in, students arriving, warm light and natural ambience.",
-  "aspectRatio": "16:9",
-  "duration": 8,
-  "resolution": "720p"
-}
+Endpoint:
+
+```text
+POST /api/prompt/enhance
 ```
 
-### GET /api/videos/status?operation=...
+Gemini biến ý tưởng ngắn thành prompt điện ảnh tiếng Anh gồm chủ thể, hành động, môi trường, shot, camera, ánh sáng, style, pacing và audio cues.
 
-Kiểm tra trạng thái long-running operation của Veo.
+## Ước tính chi phí
 
-### GET /api/videos/content?uri=...
+UI hiện hiển thị ước tính cho **Veo 3.1 Standard** dựa trên số giây và độ phân giải. Đây chỉ là ước tính giao diện; giá thực tế phải đối chiếu bảng giá Gemini API hiện hành.
 
-Proxy nội dung video từ Google. Endpoint chỉ cho phép URL HTTPS thuộc miền Google API/storage được whitelist.
+Nếu muốn giảm chi phí, có thể đổi:
 
-## Lưu ý vận hành
+```env
+VEO_MODEL=veo-3.1-fast-generate-preview
+```
 
-- Veo là dịch vụ trả phí và cần tài khoản/API key đủ điều kiện.
-- Thời gian render phụ thuộc tải hệ thống và có thể kéo dài vài phút.
-- Video trên dịch vụ nguồn chỉ được lưu tạm thời; hãy tải xuống hoặc bổ sung object storage nếu muốn lưu lâu dài.
-- Prompt tiếng Anh hiện cho độ ổn định tốt nhất.
-- Video sinh bởi Veo chịu các bộ lọc an toàn của nhà cung cấp.
+hoặc model Veo Lite tương thích nếu tài khoản có quyền truy cập.
 
-## Roadmap
+## Bảo mật đã áp dụng
 
-- Upload ảnh → image-to-video
-- Lưu lịch sử job vào PostgreSQL/Supabase
-- Object storage cho video hoàn tất
-- Authentication
-- Quota / giới hạn chi phí
-- Prompt enhancer
-- Webhook hoặc background worker
-- Deploy Vercel
+- Không gửi `GEMINI_API_KEY` xuống browser
+- Download video đi qua server proxy
+- Chỉ proxy URL HTTPS thuộc miền Google API/storage được whitelist
+- Validate tỉ lệ, thời lượng, độ phân giải
+- Validate MIME ảnh và giới hạn kích thước
+- Prompt enhancer giới hạn độ dài input
+
+## Hạn chế MVP
+
+- Chưa có đăng nhập
+- Chưa có database dùng chung nhiều thiết bị
+- Video chưa được sao chép sang object storage lâu dài
+- Chưa có credit/quota system
+- Chưa có billing
+- Chưa có reference images 3 ảnh, first/last-frame interpolation hoặc video extension trong UI
+- Chưa có background worker riêng; polling diễn ra khi trang đang mở
+
+## Roadmap production
+
+1. Supabase/PostgreSQL cho users, projects và generations
+2. Google Cloud Storage / R2 / S3 để lưu MP4 lâu dài
+3. Authentication
+4. Usage credits + rate limiting
+5. Reference images tối đa 3 ảnh
+6. First frame + last frame interpolation
+7. Extend video
+8. Model selector Standard / Fast / Lite
+9. Webhook/background worker
+10. Deployment Vercel + observability
