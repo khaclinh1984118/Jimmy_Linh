@@ -250,3 +250,22 @@ using (
   bucket_id = 'video-assets'
   and (storage.foldername(name))[1] = auth.uid()::text
 );
+
+
+-- Backfill profiles if Auth already had users before this migration.
+insert into public.profiles(id)
+select id from auth.users
+on conflict (id) do nothing;
+
+drop policy if exists "video_assets_update_own" on storage.objects;
+create policy "video_assets_update_own"
+on storage.objects for update
+to authenticated
+using (
+  bucket_id = 'video-assets'
+  and (storage.foldername(name))[1] = auth.uid()::text
+)
+with check (
+  bucket_id = 'video-assets'
+  and (storage.foldername(name))[1] = auth.uid()::text
+);
