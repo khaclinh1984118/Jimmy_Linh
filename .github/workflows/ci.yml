@@ -1,0 +1,40 @@
+name: CI Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GEMINI_API_KEY: test-key
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: test-publishable-key
+      SUPABASE_VIDEO_BUCKET: video-assets
+      PROMPT_MODEL: gemini-3.8-flash
+      VEO_STANDARD_MODEL: veo-3.1-generate-preview
+      VEO_FAST_MODEL: veo-3.1-fast-generate-preview
+      VEO_LITE_MODEL: veo-3.1-lite-generate-preview
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
